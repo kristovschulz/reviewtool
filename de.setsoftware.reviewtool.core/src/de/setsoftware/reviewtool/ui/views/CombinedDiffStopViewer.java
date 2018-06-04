@@ -35,12 +35,11 @@ import org.eclipse.swt.widgets.Label;
 import org.eclipse.ui.IViewPart;
 
 import de.setsoftware.reviewtool.base.LineSequence;
-import de.setsoftware.reviewtool.base.Pair;
 import de.setsoftware.reviewtool.base.PartialOrderAlgorithms;
 import de.setsoftware.reviewtool.base.ReviewtoolException;
-import de.setsoftware.reviewtool.diffalgorithms.DiffAlgorithmFactory;
 import de.setsoftware.reviewtool.model.Constants;
 import de.setsoftware.reviewtool.model.IStopViewer;
+import de.setsoftware.reviewtool.model.api.IFileDiff;
 import de.setsoftware.reviewtool.model.api.IFileHistoryEdge;
 import de.setsoftware.reviewtool.model.api.IFileHistoryNode;
 import de.setsoftware.reviewtool.model.api.IFragment;
@@ -310,14 +309,10 @@ public class CombinedDiffStopViewer implements IStopViewer {
      * Helper class to capture file contents as strings as well as bytes.
      */
     private static final class FileContent {
-        private final byte[] bytes;
         private final LineSequence lines;
-        private final String charset;
 
         public FileContent(final byte[] data, final String charset) throws IOException {
-            this.bytes = data;
             this.lines = new LineSequence(data, charset);
-            this.charset = charset;
         }
     }
 
@@ -400,7 +395,7 @@ public class CombinedDiffStopViewer implements IStopViewer {
             final SelectionListener fileChangedListener = new SelectionListener() {
                 @Override
                 public void widgetSelected(final SelectionEvent e) {
-                    CombinedDiffStopViewer.this.refreshShownContents();
+                    CombinedDiffStopViewer.this.refreshShownContents(stop);
                 }
 
                 @Override
@@ -433,8 +428,7 @@ public class CombinedDiffStopViewer implements IStopViewer {
                 this.viewer = new SelectableTextMergeViewer(viewerWrapper, SWT.BORDER, compareConfiguration);
             }
 
-            this.initDiffViewerContent(initialLeftRevision, initialRightRevision);
-            this.moveToLineForStop(stop, initialLeftRevision, initialRightRevision);
+            this.initDiffViewerContent(stop, initialLeftRevision, initialRightRevision);
             for (final SourceViewer v : this.viewer.getViewers()) {
                 ViewHelper.createContextMenu(view, v.getTextWidget(), v);
             }
@@ -446,7 +440,25 @@ public class CombinedDiffStopViewer implements IStopViewer {
         this.comboRight.setToolTipText(rightFile.toString());
     }
 
-    private void initDiffViewerContent(final IRevisionedFile leftRevision, final IRevisionedFile rightRevision) {
+    private void initDiffViewerContent(
+            final IStop stop,
+            final IRevisionedFile leftRevision,
+            final IRevisionedFile rightRevision) {
+
+        final IFileHistoryNode ancestor = stop.getWorkingCopy().getFileHistoryGraph().getNodeFor(leftRevision);
+        final IFileHistoryNode node = stop.getWorkingCopy().getFileHistoryGraph().getNodeFor(rightRevision);
+        final Set<? extends IFileDiff> diffs = node.buildHistories(ancestor);
+        // TODO: we currently cowardly refuse to display any history beyond the first merge parent
+        final IFileDiff diff = diffs.iterator().next();
+
+        final List<IFragment> origins = new ArrayList<>();
+        for (final IRevisionedFile file : stop.getHistory().keySet()) {
+            for (final IHunk hunk : stop.getContentFor(file)) {
+                origins.addAll(hunk.getTarget().getOrigins());
+            }
+        }
+        final List<? extends IHunk> relevantHunks = diff.getHunksWithTargetChangesInOneOf(origins);
+
         final FileContent oldContents;
         final FileContent newContents;
         try {
@@ -456,22 +468,14 @@ public class CombinedDiffStopViewer implements IStopViewer {
             throw new ReviewtoolException(e);
         }
 
-        final List<Pair<IFragment, IFragment>> relevantHunks =
-                DiffAlgorithmFactory.createDefault().determineDiff(
-                        leftRevision,
-                        oldContents.bytes,
-                        rightRevision,
-                        newContents.bytes,
-                        newContents.charset);
-
         final List<Position> oldPositions = new ArrayList<>();
         final List<Position> newPositions = new ArrayList<>();
         final List<Position> oldLineRanges = new ArrayList<>();
         final List<Position> newLineRanges = new ArrayList<>();
 
-        for (final Pair<IFragment, IFragment> hunk : relevantHunks) {
-            final IFragment sourceFragment = hunk.getFirst();
-            final IFragment targetFragment = hunk.getSecond();
+        for (final IHunk hunk : relevantHunks) {
+            final IFragment sourceFragment = hunk.getSource();
+            final IFragment targetFragment = hunk.getTarget();
 
             oldPositions.add(fragmentToPosition(oldContents.lines, sourceFragment));
             newPositions.add(fragmentToPosition(newContents.lines, targetFragment));
@@ -490,30 +494,23 @@ public class CombinedDiffStopViewer implements IStopViewer {
         this.highlightsRight = mark(
                 this.viewer.getRight(), this.highlightsRight, newPositions, newLineRanges,
                 Constants.DIFF_BACKGROUND_NEW, new RGB(148, 255, 157));
-    }
 
-    private void moveToLineForStop(
-            final IStop stop,
-            final IRevisionedFile leftRevision,
-            final IRevisionedFile rightRevision) {
-
-        reveal(this.viewer.getLeft(), this.getLineFor(stop, leftRevision, false));
-        reveal(this.viewer.getRight(), this.getLineFor(stop, rightRevision, true));
-    }
-
-    private int getLineFor(final IStop stop, final IRevisionedFile revision, final boolean right) {
-        for (final IHunk hunk : stop.getContentFor(revision)) {
-            return (right ? hunk.getTarget() : hunk.getSource()).getFrom().getLine();
+        if (!relevantHunks.isEmpty()) {
+            this.moveToLineForStop(relevantHunks.get(0));
         }
-        return stop.getMostRecentFragment().getFrom().getLine();
     }
 
-    private void refreshShownContents() {
+    private void moveToLineForStop(final IHunk hunk) {
+        reveal(this.viewer.getLeft(), hunk.getSource().getFrom().getLine());
+        reveal(this.viewer.getRight(), hunk.getTarget().getFrom().getLine());
+    }
+
+    private void refreshShownContents(final IStop stop) {
         final int oldLineLeft = this.viewer.getLeft().getTopIndex();
         final int oldLineRight = this.viewer.getRight().getTopIndex();
         final IRevisionedFile fileLeft = this.allRevisions.get(this.comboLeft.getSelectionIndex());
         final IRevisionedFile fileRight = this.allRevisions.get(this.comboRight.getSelectionIndex() + 1);
-        this.initDiffViewerContent(fileLeft, fileRight);
+        this.initDiffViewerContent(stop, fileLeft, fileRight);
         this.setTooltips(fileLeft, fileRight);
         this.viewer.getLeft().setTopIndex(oldLineLeft);
         this.viewer.getRight().setTopIndex(oldLineRight);
