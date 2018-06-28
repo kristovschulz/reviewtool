@@ -101,10 +101,14 @@ public final class FileHistoryGraph extends AbstractFileHistoryGraph implements 
 
         final ProxyableFileHistoryNode fromNode =
                 this.getOrCreateConnectedNode(fileFrom, IFileHistoryNode.Type.UNCONFIRMED);
+        assert !fromNode.getType().equals(IFileHistoryNode.Type.DELETED);
+
         final ProxyableFileHistoryNode toNode = this.getOrCreateUnconnectedNode(fileTo, IFileHistoryNode.Type.CHANGED);
         if (toNode.getType().equals(IFileHistoryNode.Type.DELETED)) {
             toNode.makeReplaced();
         }
+
+        this.detectMove(fromNode, toNode);
 
         /*
          * This can result in two copy edges (one of type COPY and one of type COPY_DELETED) between two nodes.
@@ -128,6 +132,24 @@ public final class FileHistoryGraph extends AbstractFileHistoryGraph implements 
          * but the terminating flow is redundant.
          */
         fromNode.addDescendant(toNode, IFileHistoryEdge.Type.COPY);
+    }
+
+    /**
+     * Detects whether {@code toNode} has been moved.
+     * @param fromNode Copy source of {@code toNode}.
+     * @param toNode Copy target.
+     */
+    private void detectMove(final ProxyableFileHistoryNode fromNode, final ProxyableFileHistoryNode toNode) {
+        final ProxyableFileHistoryNode possiblyDeletedNode = this.getNodeFor(
+                ChangestructureFactory.createFileInRevision(
+                        fromNode.getFile().getPath(),
+                        toNode.getFile().getRevision()));
+        if (possiblyDeletedNode != null
+                && (possiblyDeletedNode.getType().equals(IFileHistoryNode.Type.DELETED)
+                        || possiblyDeletedNode.getType().equals(IFileHistoryNode.Type.REPLACED))) {
+            possiblyDeletedNode.addMoveTarget(toNode);
+            toNode.addMoveSource(possiblyDeletedNode);
+        }
     }
 
     /**

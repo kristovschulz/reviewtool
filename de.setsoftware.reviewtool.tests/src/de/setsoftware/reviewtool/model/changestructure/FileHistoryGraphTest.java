@@ -538,6 +538,10 @@ public final class FileHistoryGraphTest {
         assertEquals(new HashSet<>(Arrays.asList(aEdgeCopy, aEdgeDel)), aOrigNode.getDescendants());
         assertEquals(Collections.singleton(aEdgeCopy), aCopyNode.getAncestors());
         assertEquals(Collections.singleton(aEdgeDel), aDelNode.getAncestors());
+
+        // move not detected as deletion was processed after copy
+        assertEquals(Collections.emptySet(), aDelNode.getMoveTargets());
+        assertEquals(Collections.emptySet(), aCopyNode.getMoveSources());
     }
 
     @Test
@@ -577,6 +581,9 @@ public final class FileHistoryGraphTest {
         assertEquals(Collections.singleton(aEdgeCopy), aOrigNode.getDescendants());
         assertEquals(Collections.singleton(aEdgeCopy), aCopyNode.getAncestors());
         assertEquals(Collections.singleton(createAlphaNode(repo, g, aDelNode)), aDelNode.getAncestors());
+
+        assertEquals(Collections.singleton(aCopyNode), aDelNode.getMoveTargets());
+        assertEquals(Collections.singleton(aDelNode), aCopyNode.getMoveSources());
     }
 
     @Test
