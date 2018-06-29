@@ -1,16 +1,15 @@
 package de.setsoftware.reviewtool.changesources.svn;
 
+import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.ListIterator;
 import java.util.Map;
-import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Set;
-import java.util.SortedMap;
-import java.util.TreeMap;
 
 import de.setsoftware.reviewtool.base.ComparableWrapper;
 import de.setsoftware.reviewtool.base.Pair;
@@ -36,14 +35,44 @@ abstract class AbstractSvnRevision implements SvnRevision {
      * @param revision The revision to process,
      */
     void integrateInto(final IMutableFileHistoryGraph graph) {
+        this.integrateInto(graph, new ArrayList<>(this.getChangedPaths().entrySet()), false);
+    }
+
+    /**
+     * Processes a single SVN repository revision by translating it into a file history graph operation.
+     *
+     * @param revision The revision to process,
+     * @param deferredBatches Copy operations to be processed later.
+     * @param skipFirstCopy If {@code true}, the first copy operation is processed "as is", else it is deferred.
+     */
+    private void integrateInto(
+            final IMutableFileHistoryGraph graph,
+            final List<Map.Entry<String, CachedLogEntryPath>> entries,
+            final boolean skipFirstCopy) {
+
         final OrderPreservingTreeNode<String, Boolean> addedPaths = OrderPreservingTreeNode.createRoot(null);
         final OrderPreservingTreeNode<String, Boolean> addedLeafs = OrderPreservingTreeNode.createRoot(null);
 
-        for (final Entry<String, CachedLogEntryPath> e : this.getChangedPaths().entrySet()) {
+        final List<List<Map.Entry<String, CachedLogEntryPath>>> deferredCopies = new ArrayList<>();
+        final ListIterator<Map.Entry<String, CachedLogEntryPath>> it = entries.listIterator();
+        boolean firstEntryProcessed = false;
+
+        while (it.hasNext()) {
+            final Map.Entry<String, CachedLogEntryPath> e = it.next();
             final String path = e.getKey();
             final CachedLogEntryPath pathInfo = e.getValue();
-            final IRevision revision = this.toRevision();
 
+            final String copyPath = pathInfo.getCopyPath();
+            if (copyPath != null) {
+                if (!skipFirstCopy || firstEntryProcessed) {
+                    deferredCopies.add(this.deferCopy(e, it));
+                    continue;
+                } else {
+                    firstEntryProcessed = true;
+                }
+            }
+
+            final IRevision revision = this.toRevision();
             if (pathInfo.isDeleted() || pathInfo.isReplaced()) {
                 final List<String> pathKey = makePathKey(path);
                 if (Optional.ofNullable(addedPaths.getNearestValue(pathKey)).orElse(false)) {
@@ -57,14 +86,14 @@ abstract class AbstractSvnRevision implements SvnRevision {
                         final TreeNodeIterator<
                                 String,
                                 Boolean,
-                                OrderPreservingTreeNode<String, Boolean>> it =
+                                OrderPreservingTreeNode<String, Boolean>> itChild =
                                         new DepthFirstTraversalTreeNodeIterator<>(
                                                 pathNode,
                                                 new TreePreOrderRootNodeStrategy<>(),
                                                 new TreeLeftToRightChildOrderStrategy<>());
 
-                        while (it.hasNext()) {
-                            final Pair<List<String>, OrderPreservingTreeNode<String, Boolean>> entry = it.next();
+                        while (itChild.hasNext()) {
+                            final Pair<List<String>, OrderPreservingTreeNode<String, Boolean>> entry = itChild.next();
                             final OrderPreservingTreeNode<String, Boolean> node = entry.getSecond();
                             // check if we found a leaf
                             if (Optional.ofNullable(node.getValue()).orElse(false)) {
@@ -87,7 +116,6 @@ abstract class AbstractSvnRevision implements SvnRevision {
             }
 
             if (pathInfo.isNew() || pathInfo.isReplaced()) {
-                final String copyPath = pathInfo.getCopyPath();
                 if (copyPath != null) {
                     final long copyRevisionNumber = pathInfo.getCopyRevision();
                     final IRepoRevision<ComparableWrapper<Long>> copyRevision =
@@ -132,26 +160,36 @@ abstract class AbstractSvnRevision implements SvnRevision {
                                 this.getRepository())));
             }
         }
+
+        for (final List<Map.Entry<String, CachedLogEntryPath>> deferredCopy : deferredCopies) {
+            this.integrateInto(graph, deferredCopy, true);
+        }
     }
 
     /**
-     * Filters out all changed paths that do not belong to passed working copy.
-     * @param paths The paths to filter.
-     * @param wc The working copy.
-     * @return A map of path entries that belong to passed working copy.
+     * Defers a copy target and all entries that refer to a subpath of the copy target.
+     * @param firstEntry The first entry denoting the copy operation.
+     * @param it The entry iterator.
+     * @return The batch containing all deferred entries.
      */
-    protected final SortedMap<String, CachedLogEntryPath> filterPaths(final SvnWorkingCopy wc) {
+    private List<Map.Entry<String, CachedLogEntryPath>> deferCopy(
+            final Map.Entry<String, CachedLogEntryPath> firstEntry,
+            final ListIterator<Map.Entry<String, CachedLogEntryPath>> it) {
 
-        final SortedMap<String, CachedLogEntryPath> result = new TreeMap<>();
-        final Iterator<Map.Entry<String, CachedLogEntryPath>> it = this.getChangedPaths().entrySet().iterator();
+        final List<Map.Entry<String, CachedLogEntryPath>> batch = new ArrayList<>();
+        batch.add(firstEntry);
+
         while (it.hasNext()) {
             final Map.Entry<String, CachedLogEntryPath> entry = it.next();
-            if (wc.toAbsolutePathInWc(entry.getKey()) != null) {
-                result.put(entry.getKey(), entry.getValue());
+            if (Paths.get(entry.getKey()).startsWith(firstEntry.getKey())) {
+                batch.add(entry);
+            } else {
+                it.previous();
+                return batch;
             }
         }
 
-        return result;
+        return batch;
     }
 
     /**
